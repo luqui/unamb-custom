@@ -191,23 +191,17 @@ race :: IO a -> IO a -> IO a
 race ioa iob = do
     var <- newEmptyMVar
     let writer = (>>= putMVar var)
-    newMThread theScheduler $ handle (writer ioa)
-    newMThread theScheduler $ handle (writer iob)
+    newMThread theScheduler $ ignoreExceptions (writer ioa)
+    newMThread theScheduler $ ignoreExceptions (writer iob)
     takeMVar var
     where
-    uhandler (ErrorCall "Prelude.undefined") = return ()
-    uhandler err = throw err
-    bhandler BlockedOnDeadMVar = return ()
-    nthandler NonTermination = return ()
-
-    handle x = x `catch` uhandler `catch` bhandler `catch` nthandler
+    ignoreExceptions io = io `catch` (\e -> let _ = (e::SomeException) in return ())
 
 -- | Unambiguous choice.  Calling @unamb x y@ has a proof obligation
 -- that if @x \/= _|_@ and @y \/= _|_@ then @x = y@.  If this is satisfied,
 -- returns the more defined of the two.
 --
--- Presently, it treats @Prelude.undefined@ (and of course regular
--- nontermination) as @_|_@, but no other erroneous conditions.
+-- @unamb@ will treat any exception raised as @_|_@.
 unamb :: a -> a -> a
 unamb a b = unsafePerformIO $ race (return $! a) (return $! b)
 
