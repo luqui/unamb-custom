@@ -26,7 +26,7 @@
 -- whose purpose is to make feasabile \"dense\" uses of 
 -- @unamb@ such as:
 --
--- > foldr1 unamb [ if x == 100 then 100 else never | x <- [0..] ] 
+-- > foldr1 unamb [ if x == 100 then 100 else undefined | x <- [0..] ] 
 ----------------------------------------
 
 module UnambCustom.Unamb 
@@ -203,7 +203,7 @@ race ioa iob = do
 --
 -- @unamb@ will treat any exception raised as @_|_@.
 unamb :: a -> a -> a
-unamb a b = unsafePerformIO $ race (return $! a) (return $! b)
+unamb a b = unsafePerformIO $ race (evaluate a) (evaluate b)
 
 -- | Kill all active threads managed by the custom scheduler.
 -- Useful for debugging in interactive sessions, but not 
