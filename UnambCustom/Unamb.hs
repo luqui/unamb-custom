@@ -83,13 +83,13 @@ putMVar' = const putMVar
 data LiveEntry = LiveEntry {
     aliveVar :: IORef Bool,
     -- we use this instead of Set for smoother interaction with the other various maps
-    subthreads :: IORef (Map.Map ThreadId ())
+    subthreads :: IORef (Map.Map ThreadId ()),
+    parentEntry :: Maybe LiveEntry
 }
 
 -- A record in the queue of threads to spark
 data ForkRecord = ForkRecord {
     frParent :: ThreadId,   
-    frParentEntry :: Maybe LiveEntry, -- if Nothing, was not sparked from a managed thread
     frEntry :: LiveEntry,
     frAction :: IO ()
 }
@@ -110,41 +110,48 @@ makeScheduler = do
     forkIO $ schedDaemon sched
     return sched
 
-newLiveEntry :: IO LiveEntry
-newLiveEntry = do
+newLiveEntry :: Maybe LiveEntry -> IO LiveEntry
+newLiveEntry parent = do
     var <- newIORef True
     subs <- newIORef Map.empty
-    return $ LiveEntry var subs
+    return $ LiveEntry var subs parent
 
+newMThreadWithParent :: Scheduler -> Maybe LiveEntry -> IO () -> IO ()
+newMThreadWithParent sched parententry thr = block $ do
+    parentid <- myThreadId
+    entry <- newLiveEntry parententry
+    writeChan (forkQueue sched) $ ForkRecord {
+        frParent = parentid,
+        frEntry = entry,
+        frAction = thr }
+    
 newMThread :: Scheduler -> IO () -> IO ()
 newMThread sched thr = block $ do
-    entry <- newLiveEntry
     parentid <- myThreadId
     livemap <- takeMVar' "newMThread " (liveMap sched)
     parententry <- return $! Map.lookup parentid livemap
-    writeChan (forkQueue sched) $ ForkRecord {
-        frParent = parentid,
-        frParentEntry = parententry,
-        frEntry = entry,
-        frAction = thr }
+    newMThreadWithParent sched parententry thr
     putMVar' "newMThread " (liveMap sched) livemap
 
 endMThread :: Scheduler -> ThreadId -> IO ()
 endMThread sched threadid = block $ do
     livemap <- takeMVar' "endMThread " (liveMap sched)
     death <- execWriterT $ go livemap threadid
-    putMVar' "endMThread " (liveMap sched) $ livemap `Map.difference` death
+    putMVar' "endMThread " (liveMap sched) $ 
+        Map.delete threadid (livemap `Map.difference` death)
     mapM_ killThread (Map.keys death)
     where
     go livemap threadid = do
         case Map.lookup threadid livemap of
             Nothing -> return ()
             Just entry -> do
+                case parentEntry entry of
+                    Nothing -> return ()
+                    Just p -> liftIO $ safeModifyIORef (subthreads p) (Map.delete threadid)
                 subs <- liftIO . readIORef $ subthreads entry
                 tell subs
                 liftIO $ writeIORef (aliveVar entry) False
-                forM_ (Map.keys subs) $ \child -> do
-                    go livemap child
+                forM_ (Map.keys subs) $ go livemap
 
 killMThread :: Scheduler -> ThreadId -> IO ()
 killMThread sched threadid = do
@@ -156,7 +163,7 @@ schedDaemon sched = forever . block $ do
     record <- readChan (forkQueue sched)
     livemap <- takeMVar' "schedDaemon" (liveMap sched)
 
-    case frParentEntry record of
+    case parentEntry (frEntry record) of
         -- unmanaged parent
         Nothing -> do   
             childid <- forkIO $ 
@@ -185,17 +192,33 @@ rebootSched sched = block $ do
 {-# NOINLINE theScheduler #-}
 theScheduler = unsafePerformIO makeScheduler
 
--- | Race two actions against each other, returning the value
--- of the first one to finish.
-race :: IO a -> IO a -> IO a
-race ioa iob = do
+raceOn :: Scheduler -> IO a -> IO a -> IO a
+raceOn sched ioa iob = do
+    -- bootstrap with a single thread if it is not already managed
+    livemap <- readMVar (liveMap sched)
+    mythread <- myThreadId
+    case Map.lookup mythread livemap of
+        Nothing -> do
+            var <- newEmptyMVar
+            newMThreadWithParent sched Nothing $ do
+                unsafeRaceOn sched ioa iob >>= putMVar var
+            takeMVar var
+        Just _ -> unsafeRaceOn sched ioa iob
+
+unsafeRaceOn :: Scheduler -> IO a -> IO a -> IO a
+unsafeRaceOn sched ioa iob = do
     var <- newEmptyMVar
-    let writer = (>>= putMVar var)
-    newMThread theScheduler $ ignoreExceptions (writer ioa)
-    newMThread theScheduler $ ignoreExceptions (writer iob)
+    let writer a = a >>= putMVar var
+    newMThread sched $ ignoreExceptions (writer ioa)
+    newMThread sched $ ignoreExceptions (writer iob)
     takeMVar var
     where
     ignoreExceptions io = io `catch` (\e -> let _ = (e::SomeException) in return ())
+
+-- | Race two actions against each other, returning the value
+-- of the first one to finish.
+race :: IO a -> IO a -> IO a
+race = raceOn theScheduler
 
 -- | Unambiguous choice.  Calling @unamb x y@ has a proof obligation
 -- that if @x \/= _|_@ and @y \/= _|_@ then @x = y@.  If this is satisfied,
@@ -203,7 +226,7 @@ race ioa iob = do
 --
 -- @unamb@ will treat any exception raised as @_|_@.
 unamb :: a -> a -> a
-unamb a b = unsafePerformIO $ race (evaluate a) (evaluate b)
+unamb a b = unsafePerformIO $ race (return $! a) (return $! b)
 
 -- | Kill all active threads managed by the custom scheduler.
 -- Useful for debugging in interactive sessions, but not 
