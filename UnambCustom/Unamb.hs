@@ -30,9 +30,10 @@
 ----------------------------------------
 
 module UnambCustom.Unamb 
-    ( race, unamb, never, rebootScheduler )
+    ( race, unamb, rebootScheduler )
 where
 
+import Prelude hiding (catch)
 import Control.Concurrent
 import Data.IORef
 import qualified Data.Map as Map
@@ -190,27 +191,25 @@ race :: IO a -> IO a -> IO a
 race ioa iob = do
     var <- newEmptyMVar
     let writer = (>>= putMVar var)
-    newMThread theScheduler $ writer ioa
-    newMThread theScheduler $ writer iob
+    newMThread theScheduler $ handle (writer ioa)
+    newMThread theScheduler $ handle (writer iob)
     takeMVar var
+    where
+    uhandler (ErrorCall "Prelude.undefined") = return ()
+    uhandler err = throw err
+    bhandler BlockedOnDeadMVar = return ()
+    nthandler NonTermination = return ()
+
+    handle x = x `catch` uhandler `catch` bhandler `catch` nthandler
 
 -- | Unambiguous choice.  Calling @unamb x y@ has a proof obligation
--- that if @x /= _|_@ and @y /= _|_@ then @x = y@.  If this is satisfied,
+-- that if @x \/= _|_@ and @y \/= _|_@ then @x = y@.  If this is satisfied,
 -- returns the more defined of the two.
+--
+-- Presently, it treats @Prelude.undefined@ (and of course regular
+-- nontermination) as @_|_@, but no other erroneous conditions.
 unamb :: a -> a -> a
 unamb a b = unsafePerformIO $ race (return $! a) (return $! b)
-
--- That's right, INLINE
--- Because the more shared the MVar is, the worse the performace.
--- A thread which executes takeMVar =<< newEmptyMVar will be
--- garbage collected.
-
--- | A form of @_|_@ which blocks forever (as opposed to raising an 
--- exception)
-{-# INLINE never #-}
-never :: a
-never = unsafePerformIO $ do
-    takeMVar =<< newEmptyMVar
 
 -- | Kill all active threads managed by the custom scheduler.
 -- Useful for debugging in interactive sessions, but not 
