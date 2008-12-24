@@ -3,7 +3,7 @@ Description:
     Functional concurrency with unamb using a custom scheduler, which
     makes it practical to use in dense situations (eg. infinite folds
     on unamb).
-Version: 0.11
+Version: 0.12
 Stability: experimental
 Synopsis: Functional concurrency with unamb using a custom scheduler.
 License: BSD3
